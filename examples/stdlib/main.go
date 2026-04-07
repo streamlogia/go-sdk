@@ -1,4 +1,4 @@
-// Example Go service that uses the logingestor SDK.
+// Example net/http service that uses the logingestor SDK.
 package main
 
 import (

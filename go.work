@@ -1,0 +1,9 @@
+go 1.25.5
+
+use (
+	.
+	./examples/echo
+	./examples/fiber
+	./examples/gin
+	./examples/stdlib
+)
