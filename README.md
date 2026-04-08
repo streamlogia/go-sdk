@@ -5,7 +5,7 @@ A Go client library for sending structured logs to the [Streamlogia](https://str
 ## Features
 
 - Structured log ingestion (DEBUG, INFO, WARN, ERROR)
-- Asynchronous batching with configurable flush interval and batch size
+- Real-time streaming — every entry is sent immediately, no buffering
 - `log/slog` handler integration
 - HTTP middleware for automatic request/response logging
 - Multi-handler fan-out (e.g. stdout + ingestor simultaneously)
@@ -34,8 +34,7 @@ import (
 
 func main() {
     client := logingestor.New(
-        "https://api.streamlogia.com",
-        "<jwt-token>",
+        "<api-key>",
         "<project-id>",
         logingestor.WithSource("my-service"),
     )
@@ -243,7 +242,7 @@ Each example is a self-contained module under `examples/`. Run any of them with:
 
 ```sh
 cd examples/stdlib   # or fiber, gin, echo
-LOGINGESTOR_TOKEN=<token> LOGINGESTOR_PROJECT_ID=<id> go run .
+LOGINGESTOR_API_KEY=<key> LOGINGESTOR_PROJECT_ID=<id> go run .
 ```
 
 ## Configuration
@@ -252,26 +251,21 @@ Pass option functions to `logingestor.New`:
 
 ```go
 client := logingestor.New(
-    baseURL,
-    token,
+    apiKey,
     projectID,
     logingestor.WithSource("order-service"),
-    logingestor.WithBatchSize(50),
-    logingestor.WithFlushInterval(10*time.Second),
     logingestor.WithHTTPClient(&http.Client{Timeout: 5 * time.Second}),
 )
 ```
 
-| Option                               | Default        | Description                                        |
-| ------------------------------------ | -------------- | -------------------------------------------------- |
-| `WithSource(s string)`               | `""`           | Default `source` field on every log entry          |
-| `WithBatchSize(n int)`               | `1`            | Flush automatically after accumulating `n` entries |
-| `WithFlushInterval(d time.Duration)` | `5s`           | Background flush interval                          |
-| `WithHTTPClient(hc *http.Client)`    | default client | Custom HTTP client (timeouts, transport, etc.)     |
+| Option                            | Default        | Description                                    |
+| --------------------------------- | -------------- | ---------------------------------------------- |
+| `WithSource(s string)`            | `"unknown"`    | Default `source` field on every log entry      |
+| `WithHTTPClient(hc *http.Client)` | default client | Custom HTTP client (timeouts, transport, etc.) |
 
 ## Graceful Shutdown
 
-Call `client.Close()` (or `defer client.Close()`) before your process exits. It flushes any buffered entries and waits for the background goroutine to stop.
+Call `client.Close()` (or `defer client.Close()`) before your process exits. It waits for all in-flight HTTP requests to complete so no entries are dropped.
 
 ```go
 client := logingestor.New(...)
@@ -312,7 +306,7 @@ logingestor.LevelError // "ERROR"
 
 | Method                                           | Description                                   |
 | ------------------------------------------------ | --------------------------------------------- |
-| `New(baseURL, token, projectID, opts...)`        | Create a new client                           |
+| `New(apiKey, projectID, opts...)`       | Create a new client                           |
 | `Debug/Info/Warn/Error(ctx, msg, meta, tags...)` | Log at the given level                        |
 | `Ingest(ctx, entries)`                           | Send entries immediately, bypassing the queue |
 | `Flush(ctx)`                                     | Drain the internal queue                      |

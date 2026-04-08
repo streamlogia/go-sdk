@@ -1,8 +1,11 @@
 // Package logingestor provides a Go client for the Log Ingestor API.
 //
+// Every log call sends its entry immediately in a background goroutine.
+// Call Close() before your process exits to wait for all in-flight requests.
+//
 // Basic usage:
 //
-//	client := logingestor.New("https://logs.example.com", "<jwt-token>", "<project-id>",
+//	client := logingestor.New("<api-key>", "<project-id>",
 //	    logingestor.WithSource("my-service"),
 //	)
 //	defer client.Close()
@@ -48,21 +51,17 @@ type IngestResponse struct {
 	IDs      []string `json:"ids"`
 }
 
+const baseURL = "https://api.streamlogia.com"
+
 // Client sends log entries to the Log Ingestor service.
+// Each log call dispatches a goroutine immediately — there is no internal
+// queue or flush interval. Close() waits for all in-flight requests to finish.
 type Client struct {
-	baseURL    string
-	token      string
+	apiKey     string
 	projectID  string
 	source     string
 	httpClient *http.Client
-
-	// batching
-	mu            sync.Mutex
-	queue         []Entry
-	batchSize     int
-	flushInterval time.Duration
-	stopCh        chan struct{}
-	wg            sync.WaitGroup
+	wg         sync.WaitGroup
 }
 
 // Option configures a Client.
@@ -78,78 +77,56 @@ func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
 
-// WithBatchSize overrides how many entries to accumulate before flushing.
-// Default is 1 (every entry is sent immediately). Increase only if you
-// explicitly need to reduce network calls at the cost of latency.
-func WithBatchSize(n int) Option {
-	return func(c *Client) { c.batchSize = n }
-}
-
-// WithFlushInterval sets how often the background goroutine flushes the
-// pending queue regardless of batch size. Default is 5 seconds.
-func WithFlushInterval(d time.Duration) Option {
-	return func(c *Client) { c.flushInterval = d }
-}
-
-// New creates a client and starts the background flush goroutine.
+// New creates a client. Each log method sends its entry immediately.
 //
-//   - baseURL  – e.g. "https://logs.example.com" (no trailing slash)
-//   - token    – JWT bearer token obtained from the auth service
+//   - apiKey    – API key obtained from the Streamlogia dashboard
 //   - projectID – UUID of the project to ingest into
-func New(baseURL, token, projectID string, opts ...Option) *Client {
+func New(apiKey, projectID string, opts ...Option) *Client {
 	c := &Client{
-		baseURL:       baseURL,
-		token:         token,
-		projectID:     projectID,
-		source:        "unknown",
-		httpClient:    &http.Client{Timeout: 10 * time.Second},
-		batchSize:     1,
-		flushInterval: 5 * time.Second,
-		stopCh:        make(chan struct{}),
+		apiKey:     apiKey,
+		projectID:  projectID,
+		source:     "unknown",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	for _, o := range opts {
 		o(c)
 	}
-
-	c.wg.Add(1)
-	go c.backgroundFlusher()
-
 	return c
 }
 
 // Debug logs at DEBUG level.
 func (c *Client) Debug(ctx context.Context, message string, meta map[string]any, tags ...string) {
-	c.enqueue(ctx, LevelDebug, message, meta, tags)
+	c.send(LevelDebug, message, meta, tags)
 }
 
 // Info logs at INFO level.
 func (c *Client) Info(ctx context.Context, message string, meta map[string]any, tags ...string) {
-	c.enqueue(ctx, LevelInfo, message, meta, tags)
+	c.send(LevelInfo, message, meta, tags)
 }
 
 // Warn logs at WARN level.
 func (c *Client) Warn(ctx context.Context, message string, meta map[string]any, tags ...string) {
-	c.enqueue(ctx, LevelWarn, message, meta, tags)
+	c.send(LevelWarn, message, meta, tags)
 }
 
 // Error logs at ERROR level.
 func (c *Client) Error(ctx context.Context, message string, meta map[string]any, tags ...string) {
-	c.enqueue(ctx, LevelError, message, meta, tags)
+	c.send(LevelError, message, meta, tags)
 }
 
-// Ingest sends a batch of entries immediately, bypassing the internal queue.
-// Useful when you need a synchronous guarantee (e.g., before process exit).
+// Ingest sends entries to the API directly. The call blocks until the HTTP
+// request completes. Use this when you need synchronous delivery guarantees.
 func (c *Client) Ingest(ctx context.Context, entries []Entry) (*IngestResponse, error) {
 	body, err := json.Marshal(entries)
 	if err != nil {
 		return nil, fmt.Errorf("logingestor: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/ingest", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/ingest", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("logingestor: build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -170,30 +147,15 @@ func (c *Client) Ingest(ctx context.Context, entries []Entry) (*IngestResponse, 
 	return &result, nil
 }
 
-// Flush drains the internal queue immediately. Call this before your process
-// exits to ensure no buffered logs are lost.
-func (c *Client) Flush(ctx context.Context) error {
-	c.mu.Lock()
-	batch := c.queue
-	c.queue = nil
-	c.mu.Unlock()
-
-	if len(batch) == 0 {
-		return nil
-	}
-	_, err := c.Ingest(ctx, batch)
-	return err
-}
-
-// Close flushes pending logs and stops the background goroutine.
+// Close waits for all in-flight log requests to complete. Call it (or defer
+// it) before your process exits to ensure no entries are dropped.
 func (c *Client) Close() error {
-	close(c.stopCh)
 	c.wg.Wait()
-	return c.Flush(context.Background())
+	return nil
 }
 
-// enqueue adds an entry to the internal queue and triggers a flush if full.
-func (c *Client) enqueue(_ context.Context, level Level, message string, meta map[string]any, tags []string) {
+// send dispatches a single entry to the API in a background goroutine.
+func (c *Client) send(level Level, message string, meta map[string]any, tags []string) {
 	now := time.Now().UTC()
 	entry := Entry{
 		ProjectID: c.projectID,
@@ -205,29 +167,9 @@ func (c *Client) enqueue(_ context.Context, level Level, message string, meta ma
 		Meta:      meta,
 	}
 
-	c.mu.Lock()
-	c.queue = append(c.queue, entry)
-	shouldFlush := len(c.queue) >= c.batchSize
-	c.mu.Unlock()
-
-	if shouldFlush {
-		go func() {
-			_ = c.Flush(context.Background())
-		}()
-	}
-}
-
-func (c *Client) backgroundFlusher() {
-	defer c.wg.Done()
-	ticker := time.NewTicker(c.flushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			_ = c.Flush(context.Background())
-		case <-c.stopCh:
-			return
-		}
-	}
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		_, _ = c.Ingest(context.Background(), []Entry{entry})
+	}()
 }

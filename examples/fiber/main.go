@@ -12,13 +12,12 @@ import (
 )
 
 func main() {
-	token := os.Getenv("LOGINGESTOR_TOKEN")
+	apiKey := os.Getenv("LOGINGESTOR_API_KEY")
 	projectID := os.Getenv("LOGINGESTOR_PROJECT_ID")
 
 	// ── 1. Create the client ─────────────────────────────────────────────────
 	client := logingestor.New(
-		"https://api.streamlogia.com",
-		token,
+		apiKey,
 		projectID,
 		logingestor.WithSource("order-service"),
 	)

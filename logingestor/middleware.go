@@ -59,7 +59,7 @@ func (c *Client) HTTPMiddleware(next http.Handler) http.Handler {
 
 		level := levelForStatus(rw.status)
 		msg := fmt.Sprintf("%s %s %d (%dms)", r.Method, r.URL.Path, rw.status, duration.Milliseconds())
-		c.enqueue(r.Context(), level, msg, meta, nil)
+		c.send(level, msg, meta, nil)
 	})
 }
 

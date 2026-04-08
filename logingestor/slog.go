@@ -33,7 +33,7 @@ func (h *SlogHandler) Enabled(_ context.Context, _ slog.Level) bool {
 	return true
 }
 
-// Handle converts an slog.Record into a log entry and enqueues it.
+// Handle converts an slog.Record into a log entry and sends it immediately.
 func (h *SlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	meta := make(map[string]any, r.NumAttrs()+len(h.attrs))
 
@@ -45,7 +45,7 @@ func (h *SlogHandler) Handle(ctx context.Context, r slog.Record) error {
 		return true
 	})
 
-	h.client.enqueue(ctx, slogLevel(r.Level), r.Message, meta, nil)
+	h.client.send(slogLevel(r.Level), r.Message, meta, nil)
 	return nil
 }
 
