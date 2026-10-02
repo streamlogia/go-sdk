@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,12 +53,20 @@ type IngestResponse struct {
 	IDs      []string `json:"ids"`
 }
 
-const baseURL = "https://api.streamlogia.com"
+// DefaultBaseURL is the hosted service. A self-hosted installation points the
+// client at its own API with WithBaseURL or the STREAMLOGIA_API_URL
+// environment variable.
+const DefaultBaseURL = "https://api.streamlogia.com"
+
+// EnvBaseURL is the environment variable the client reads its base URL from
+// when WithBaseURL is not used.
+const EnvBaseURL = "STREAMLOGIA_API_URL"
 
 // Client sends log entries to the Log Ingestor service.
 // Each log call dispatches a goroutine immediately — there is no internal
 // queue or flush interval. Close() waits for all in-flight requests to finish.
 type Client struct {
+	baseURL    string
 	apiKey     string
 	projectID  string
 	source     string
@@ -72,17 +82,32 @@ func WithSource(source string) Option {
 	return func(c *Client) { c.source = source }
 }
 
-// WithHTTPClient replaces the default HTTP client.
+// WithHTTPClient replaces the default HTTP client. Use it to trust a private
+// certificate authority or to route through a proxy.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
 
+// WithBaseURL points the client at a self-hosted Streamlogia API, e.g.
+// "https://logs-api.corp.example". It takes precedence over STREAMLOGIA_API_URL.
+func WithBaseURL(u string) Option {
+	return func(c *Client) {
+		if u = strings.TrimRight(strings.TrimSpace(u), "/"); u != "" {
+			c.baseURL = u
+		}
+	}
+}
+
 // New creates a client. Each log method sends its entry immediately.
 //
-//   - apiKey    – API key obtained from the Streamlogia dashboard
+//   - apiKey    – an ingest API key (ls_app_live_…) from the dashboard's API Keys page
 //   - projectID – UUID of the project to ingest into
+//
+// The base URL is DefaultBaseURL unless STREAMLOGIA_API_URL is set or
+// WithBaseURL is passed.
 func New(apiKey, projectID string, opts ...Option) *Client {
 	c := &Client{
+		baseURL:    baseURLFromEnv(),
 		apiKey:     apiKey,
 		projectID:  projectID,
 		source:     "unknown",
@@ -122,7 +147,7 @@ func (c *Client) Ingest(ctx context.Context, entries []Entry) (*IngestResponse, 
 		return nil, fmt.Errorf("logingestor: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/ingest", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/ingest", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("logingestor: build request: %w", err)
 	}
@@ -145,6 +170,16 @@ func (c *Client) Ingest(ctx context.Context, entries []Entry) (*IngestResponse, 
 		return nil, fmt.Errorf("logingestor: decode response: %w", err)
 	}
 	return &result, nil
+}
+
+// BaseURL reports where the client sends logs.
+func (c *Client) BaseURL() string { return c.baseURL }
+
+func baseURLFromEnv() string {
+	if u := strings.TrimRight(strings.TrimSpace(os.Getenv(EnvBaseURL)), "/"); u != "" {
+		return u
+	}
+	return DefaultBaseURL
 }
 
 // Close waits for all in-flight log requests to complete. Call it (or defer

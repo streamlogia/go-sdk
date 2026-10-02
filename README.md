@@ -316,3 +316,21 @@ logingestor.LevelError // "ERROR"
 ## License
 
 [MIT](LICENSE)
+
+## Self-hosted Streamlogia
+
+The client sends to the hosted service unless told otherwise. For an
+installation on your own network, set the base URL once in the environment:
+
+```sh
+export STREAMLOGIA_API_URL=https://logs-api.corp.example
+```
+
+or in code with `logingestor.WithBaseURL("https://logs-api.corp.example")`,
+which takes precedence. The key is an **ingest key** (`ls_app_live_…`) from
+the dashboard's API Keys page, not your login token: login tokens expire with
+the session.
+
+If the installation's certificate is issued by a private CA, either install
+that CA on the host (Go trusts the system store) or pass an `*http.Client`
+whose TLS config trusts it through `WithHTTPClient`.
